@@ -123,10 +123,26 @@ const PHASE_FACTOR = { volume:1.1, intensity:1.0, deload:0.6 };
 
 /* ═══════════════════════════ STORAGE ═══════════════════════════ */
 async function stGet(k) {
-  try { const r = await window.storage.get(k); return r ? JSON.parse(r.value) : null; } catch { return null; }
+  try {
+    if (window?.storage?.get) {
+      const r = await window.storage.get(k);
+      return r ? JSON.parse(r.value) : null;
+    }
+    const raw = window.localStorage.getItem(k);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
 }
 async function stSet(k, v) {
-  try { await window.storage.set(k, JSON.stringify(v)); } catch {}
+  try {
+    const raw = JSON.stringify(v);
+    if (window?.storage?.set) {
+      await window.storage.set(k, raw);
+      return;
+    }
+    window.localStorage.setItem(k, raw);
+  } catch {}
 }
 
 function weekStartKey(date = new Date()) {
@@ -167,6 +183,8 @@ export default function App() {
   const [workoutLogs, setWorkoutLogs] = useState({});
   const [exNotes, setExNotes]   = useState({});
   const [ioMsg, setIoMsg]       = useState("");
+  const [scheduleMsg, setScheduleMsg] = useState("");
+  const [hydrated, setHydrated] = useState(false);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -183,7 +201,26 @@ export default function App() {
       if (settingData?.goal) setGoal(settingData.goal);
       if (settingData?.phaseWeek) setPhaseWeek(settingData.phaseWeek);
       if (typeof settingData?.noPrStreak === "number") setNoPrStreak(settingData.noPrStreak);
+
+      const savedFreq = Number(settingData?.freq);
+      const savedAssigned = Array.isArray(settingData?.assigned)
+        ? settingData.assigned.filter(d => Number.isInteger(d) && d >= 0 && d <= 6)
+        : [];
+      if (savedFreq && PROGRAMS[savedFreq] && savedAssigned.length === savedFreq) {
+        setFreq(savedFreq);
+        setAssigned(savedAssigned);
+        const todayWeekday = (new Date().getDay() + 6) % 7;
+        const todayProgramIdx = savedAssigned.indexOf(todayWeekday);
+        if (todayProgramIdx !== -1) {
+          setDayIdx(todayProgramIdx);
+          setStep("day");
+        } else {
+          setStep("program");
+        }
+      }
+
       setPrReady(true);
+      setHydrated(true);
     });
   }, []);
 
@@ -211,6 +248,10 @@ export default function App() {
   const pickFreq = n => {
     setFreq(n);
     setAssigned(RECOVERY_SCHEDULES[n].days);
+    setDayIdx(null);
+    setDoneMap({});
+    setInputMap({});
+    setScheduleMsg("");
     setStep("suggest");
   };
 
@@ -221,6 +262,13 @@ export default function App() {
     } else {
       if (editing.length < freq) setEditing(p => [...p, i].sort((a,b)=>a-b));
     }
+  };
+
+  const openDay = (i) => {
+    setDayIdx(i);
+    setDoneMap({});
+    setInputMap({});
+    setStep("day");
   };
 
   /* —— PR save —— */
@@ -273,18 +321,57 @@ export default function App() {
   useEffect(() => {
     if (step !== "day" || !prog || dayIdx === null) return;
     const dayData = prog.days[dayIdx];
-    const total = dayData.exIds.reduce((a,id) => a + (EX_DB[id]?.sets || 0), 0);
+    const total = dayData.exIds.reduce((a,id) => a + calcTargetSets(EX_DB[id]), 0);
     const done  = Object.values(doneMap).filter(Boolean).length;
     if (!done) return;
     const wk = weekStartKey();
     setWorkoutLogs(prev => {
-      const next = { ...prev, [wk]: { sessions: Math.max(prev[wk]?.sessions || 0, 1), setsDone: done, setsTotal: total } };
+      const prevWeek = prev[wk] || { sessions:0, setsDone:0, setsTotal:0, completedWeekdays:[] };
+      const completed = new Set(prevWeek.completedWeekdays || []);
+      const weekday = assigned[dayIdx];
+      if (total > 0 && done >= total && weekday !== undefined) completed.add(weekday);
+      const nextWeek = {
+        ...prevWeek,
+        sessions: completed.size,
+        setsDone: done,
+        setsTotal: total,
+        completedWeekdays: [...completed].sort((a,b) => a - b)
+      };
+      const next = { ...prev, [wk]: nextWeek };
       stSet("gf2:logs", next);
       return next;
     });
-  }, [doneMap, step, dayIdx, prog]);
+  }, [doneMap, step, dayIdx, prog, assigned, calcTargetSets]);
 
-  const weekly = workoutLogs[weekStartKey()] || { sessions:0, setsDone:0, setsTotal:0 };
+  const weekly = workoutLogs[weekStartKey()] || { sessions:0, setsDone:0, setsTotal:0, completedWeekdays:[] };
+  const todayWeekday = (new Date().getDay() + 6) % 7;
+  const missedDays = assigned.filter(d => d < todayWeekday && !(weekly.completedWeekdays || []).includes(d));
+
+  const replanMissedWeek = () => {
+    if (!prog || !assigned.length) return;
+    const completed = new Set(weekly.completedWeekdays || []);
+    const remainingProgramDays = prog.days.map((_, i) => i).filter(i => !completed.has(assigned[i]));
+    const candidateDays = [];
+    for (let d = todayWeekday; d < 7; d += 1) {
+      if (!completed.has(d)) candidateDays.push(d);
+    }
+    if (candidateDays.length < remainingProgramDays.length) {
+      setScheduleMsg("今週の残り日数では組み直せません。頻度を下げるか来週プランで調整してください。");
+      return;
+    }
+    const nextAssigned = [...assigned];
+    remainingProgramDays.forEach((programIndex, idx) => {
+      nextAssigned[programIndex] = candidateDays[idx];
+    });
+    setAssigned(nextAssigned);
+    setScheduleMsg("今週の残り日程で組み直しました。今日のメニューを表示します。");
+    const todayProgramIdx = nextAssigned.indexOf(todayWeekday);
+    if (todayProgramIdx !== -1) {
+      openDay(todayProgramIdx);
+    } else {
+      setStep("program");
+    }
+  };
 
   const suggestNext = (exId, ex) => {
     const pr = prs[exId];
@@ -296,7 +383,7 @@ export default function App() {
   };
 
   const exportData = () => {
-    const payload = { prs, logs: workoutLogs, notes: exNotes, settings: { restSeconds }, exportedAt: new Date().toISOString() };
+    const payload = { prs, logs: workoutLogs, notes: exNotes, settings: { restSeconds, goal, phaseWeek, noPrStreak, freq, assigned }, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -315,7 +402,12 @@ export default function App() {
       if (json.prs && typeof json.prs === "object") { setPrs(json.prs); await stSet("gf2:prs", json.prs); }
       if (json.logs && typeof json.logs === "object") { setWorkoutLogs(json.logs); await stSet("gf2:logs", json.logs); }
       if (json.notes && typeof json.notes === "object") { setExNotes(json.notes); await stSet("gf2:notes", json.notes); }
-      if (json.settings?.restSeconds) { setRestSeconds(json.settings.restSeconds); await stSet("gf2:settings", { restSeconds: json.settings.restSeconds }); }
+      if (json.settings?.restSeconds) setRestSeconds(json.settings.restSeconds);
+      if (json.settings?.goal) setGoal(json.settings.goal);
+      if (json.settings?.phaseWeek) setPhaseWeek(json.settings.phaseWeek);
+      if (typeof json.settings?.noPrStreak === "number") setNoPrStreak(json.settings.noPrStreak);
+      if (json.settings?.freq && PROGRAMS[json.settings.freq]) setFreq(json.settings.freq);
+      if (Array.isArray(json.settings?.assigned)) setAssigned(json.settings.assigned);
       setIoMsg("バックアップを復元しました");
     } catch {
       setIoMsg("バックアップの読み込みに失敗しました");
@@ -326,8 +418,9 @@ export default function App() {
   };
 
   useEffect(() => {
-    stSet("gf2:settings", { restSeconds, goal, phaseWeek, noPrStreak });
-  }, [restSeconds, goal, phaseWeek, noPrStreak]);
+    if (!hydrated) return;
+    stSet("gf2:settings", { restSeconds, goal, phaseWeek, noPrStreak, freq, assigned });
+  }, [restSeconds, goal, phaseWeek, noPrStreak, freq, assigned, hydrated]);
 
   const nextPhaseWeek = () => setPhaseWeek(p => p >= PHASE_WEEKS.length ? 1 : p + 1);
 
@@ -588,8 +681,22 @@ export default function App() {
             })}
           </div>
 
+          {assigned.includes(todayWeekday) && (
+            <button className="p" onClick={() => openDay(assigned.indexOf(todayWeekday))} style={{
+              width:"100%", background:A, border:"none", borderRadius:12, padding:"13px",
+              fontSize:15, fontFamily:"inherit", fontWeight:700, color:"#000", cursor:"pointer", letterSpacing:"0.08em", marginBottom:10
+            }}>今日のメニューを開く</button>
+          )}
+          {missedDays.length > 0 && (
+            <button className="p" onClick={replanMissedWeek} style={{
+              width:"100%", background:"#171717", border:"1px solid #2a2a2a", borderRadius:12, padding:"12px",
+              fontSize:13, fontFamily:"sans-serif", color:"#bbb", cursor:"pointer", marginBottom:10
+            }}>今週の予定を無料で組み直す（未実施 {missedDays.length} 日）</button>
+          )}
+          {scheduleMsg && <div style={{ marginBottom:12, fontFamily:"sans-serif", fontSize:12, color:"#7f7f7f" }}>{scheduleMsg}</div>}
+
           {prog.days.map((day,i) => (
-            <button key={i} className="p hov" onClick={() => { setDayIdx(i); setDoneMap({}); setInputMap({}); setStep("day"); }} style={{
+            <button key={i} className="p hov" onClick={() => openDay(i)} style={{
               width:"100%", background:"#111", border:"1px solid #1d1d1d", borderRadius:14,
               padding:"15px 17px", cursor:"pointer", textAlign:"left",
               display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8
@@ -684,9 +791,6 @@ export default function App() {
                         <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
                           <Tag c={LV_COLOR[ex.lv]}>{LV_LABEL[ex.lv]}</Tag>
                           <Tag>{targetSets}セット × {ex.reps}回</Tag>
-                        </div>
-                        <div style={{ marginTop:6, fontFamily:"sans-serif", fontSize:11, color:"#666" }}>
-                          {suggestNext(exId, ex)}
                         </div>
                         <div style={{ marginTop:6, fontFamily:"sans-serif", fontSize:11, color:"#666" }}>
                           {suggestNext(exId, ex)}
