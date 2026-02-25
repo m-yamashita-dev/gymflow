@@ -161,6 +161,9 @@ export default function App() {
   const [newPrFlash, setNewPrFlash] = useState(null);   // exId of newly beaten PR
   const [restSeconds, setRestSeconds] = useState(90);
   const [restLeft, setRestLeft] = useState(0);
+  const [goal, setGoal]         = useState("beginner");
+  const [phaseWeek, setPhaseWeek] = useState(1);
+  const [noPrStreak, setNoPrStreak] = useState(0);
   const [workoutLogs, setWorkoutLogs] = useState({});
   const [exNotes, setExNotes]   = useState({});
   const [ioMsg, setIoMsg]       = useState("");
@@ -177,6 +180,9 @@ export default function App() {
       if (logData) setWorkoutLogs(logData);
       if (noteData) setExNotes(noteData);
       if (settingData?.restSeconds) setRestSeconds(settingData.restSeconds);
+      if (settingData?.goal) setGoal(settingData.goal);
+      if (settingData?.phaseWeek) setPhaseWeek(settingData.phaseWeek);
+      if (typeof settingData?.noPrStreak === "number") setNoPrStreak(settingData.noPrStreak);
       setPrReady(true);
     });
   }, []);
