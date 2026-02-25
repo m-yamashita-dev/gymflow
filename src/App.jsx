@@ -164,9 +164,6 @@ export default function App() {
   const [workoutLogs, setWorkoutLogs] = useState({});
   const [exNotes, setExNotes]   = useState({});
   const [ioMsg, setIoMsg]       = useState("");
-  const [goal, setGoal]         = useState("beginner");
-  const [phaseWeek, setPhaseWeek] = useState(1);
-  const [noPrStreak, setNoPrStreak] = useState({});
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -180,9 +177,6 @@ export default function App() {
       if (logData) setWorkoutLogs(logData);
       if (noteData) setExNotes(noteData);
       if (settingData?.restSeconds) setRestSeconds(settingData.restSeconds);
-      if (settingData?.goal) setGoal(settingData.goal);
-      if (settingData?.phaseWeek) setPhaseWeek(settingData.phaseWeek);
-      if (settingData?.noPrStreak) setNoPrStreak(settingData.noPrStreak);
       setPrReady(true);
     });
   }, []);
@@ -265,13 +259,7 @@ export default function App() {
     setDoneMap(p => ({ ...p, [key]: next }));
     if (next) {
       const i = getInp(exId, si);
-      const improved = await savePr(exId, i.w, i.r);
-      const nextStreak = {
-        ...noPrStreak,
-        [exId]: improved ? 0 : (noPrStreak[exId] || 0) + 1,
-      };
-      setNoPrStreak(nextStreak);
-      await stSet("gf2:settings", { restSeconds, goal, phaseWeek, noPrStreak: nextStreak });
+      await savePr(exId, i.w, i.r);
       await startRestTimer();
     }
   };
@@ -279,38 +267,30 @@ export default function App() {
   useEffect(() => {
     if (step !== "day" || !prog || dayIdx === null) return;
     const dayData = prog.days[dayIdx];
-    const total = dayData.exIds.reduce((a,id) => a + calcTargetSets(EX_DB[id]), 0);
+    const total = dayData.exIds.reduce((a,id) => a + (EX_DB[id]?.sets || 0), 0);
     const done  = Object.values(doneMap).filter(Boolean).length;
     if (!done) return;
     const wk = weekStartKey();
-    const today = todayKey();
     setWorkoutLogs(prev => {
-      const prevWeek = prev[wk] || { sessions:0, setsDone:0, setsTotal:0, days:{} };
-      const days = { ...(prevWeek.days || {}), [today]: true };
-      const next = { ...prev, [wk]: { sessions: Object.keys(days).length, setsDone: done, setsTotal: total, days } };
+      const next = { ...prev, [wk]: { sessions: Math.max(prev[wk]?.sessions || 0, 1), setsDone: done, setsTotal: total } };
       stSet("gf2:logs", next);
       return next;
     });
-  }, [doneMap, step, dayIdx, prog, calcTargetSets]);
+  }, [doneMap, step, dayIdx, prog]);
 
-  const weekly = workoutLogs[weekStartKey()] || { sessions:0, setsDone:0, setsTotal:0, days:{} };
-  const suggestDeload = phaseInfo.type !== "deload" && weekly.setsTotal > 0 && weekly.setsDone / weekly.setsTotal < 0.55;
+  const weekly = workoutLogs[weekStartKey()] || { sessions:0, setsDone:0, setsTotal:0 };
 
   const suggestNext = (exId, ex) => {
     const pr = prs[exId];
-    const streak = noPrStreak[exId] || 0;
-    if (streak >= 6) return "停滞中: 代替種目への切替を推奨";
     if (!pr) return "次回目安: 記録後に表示";
     const maxRep = repMax(ex.reps);
-    const repBias = goalPreset.addRep || 0;
-    if (!maxRep || !pr.w) return `次回目安: ${Math.max(1, pr.r + 1 + repBias)}回`;
-    if (phaseInfo.type === "deload") return `次回目安: ${Math.max(0, Number(pr.w) - 5)}kg × ${Math.max(5, pr.r - 2)}回`;
-    if (pr.r >= maxRep + repBias) return `次回目安: ${Number(pr.w) + (goal === "strength" ? 2.5 : 1.25)}kg × ${Math.max(6, maxRep - 2)}回`;
-    return `次回目安: ${pr.w}kg × ${Math.max(1, pr.r + 1 + repBias)}回`;
+    if (!maxRep || !pr.w) return `次回目安: ${pr.r + 1}回`;
+    if (pr.r >= maxRep) return `次回目安: ${Number(pr.w) + 2.5}kg × ${Math.max(6, maxRep - 2)}回`;
+    return `次回目安: ${pr.w}kg × ${pr.r + 1}回`;
   };
 
   const exportData = () => {
-    const payload = { prs, logs: workoutLogs, notes: exNotes, settings: { restSeconds, goal, phaseWeek, noPrStreak }, exportedAt: new Date().toISOString() };
+    const payload = { prs, logs: workoutLogs, notes: exNotes, settings: { restSeconds }, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -329,11 +309,7 @@ export default function App() {
       if (json.prs && typeof json.prs === "object") { setPrs(json.prs); await stSet("gf2:prs", json.prs); }
       if (json.logs && typeof json.logs === "object") { setWorkoutLogs(json.logs); await stSet("gf2:logs", json.logs); }
       if (json.notes && typeof json.notes === "object") { setExNotes(json.notes); await stSet("gf2:notes", json.notes); }
-      if (json.settings?.restSeconds) setRestSeconds(json.settings.restSeconds);
-      if (json.settings?.goal) setGoal(json.settings.goal);
-      if (json.settings?.phaseWeek) setPhaseWeek(json.settings.phaseWeek);
-      if (json.settings?.noPrStreak) setNoPrStreak(json.settings.noPrStreak);
-      if (json.settings) await stSet("gf2:settings", json.settings);
+      if (json.settings?.restSeconds) { setRestSeconds(json.settings.restSeconds); await stSet("gf2:settings", { restSeconds: json.settings.restSeconds }); }
       setIoMsg("バックアップを復元しました");
     } catch {
       setIoMsg("バックアップの読み込みに失敗しました");
@@ -430,26 +406,6 @@ export default function App() {
                 <span style={{ color:"#555" }}>{d}</span><span style={{ color:"#ccc" }}>{m}</span>
               </div>
             ))}
-          </Card>
-
-          <Card style={{ marginTop:12 }}>
-            <Label>年間プラン設定（無料）</Label>
-            <div style={{ fontFamily:"sans-serif", fontSize:12, color:"#888", marginBottom:8 }}>目的とフェーズでセット数を自動調整します</div>
-            <div style={{ display:"grid", gridTemplateColumns:"1fr", gap:8 }}>
-              {Object.entries(GOAL_PRESETS).map(([k, v]) => (
-                <button key={k} className="p" onClick={() => setGoal(k)} style={{
-                  textAlign:"left", padding:"8px 10px", borderRadius:10,
-                  border:`1px solid ${goal === k ? A : "#252525"}`,
-                  background: goal === k ? "#121b00" : "#111",
-                  color: goal === k ? A : "#aaa", cursor:"pointer", fontFamily:"sans-serif", fontSize:12
-                }}>{v.label}</button>
-              ))}
-            </div>
-            <div style={{ marginTop:10, display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
-              <div style={{ fontFamily:"sans-serif", fontSize:12, color:"#777" }}>現在: Week {phaseWeek} / {PHASE_WEEKS.length} ({phaseInfo.label})</div>
-              <button className="p" onClick={nextPhaseWeek} style={{ background:A, color:"#000", border:"none", borderRadius:8, padding:"6px 10px", cursor:"pointer", fontWeight:700 }}>次の週へ</button>
-            </div>
-            {suggestDeload && <div style={{ marginTop:9, fontFamily:"sans-serif", fontSize:12, color:"#fbbf24" }}>達成率が低下しています。次週はデロード推奨です。</div>}
           </Card>
 
           <Card style={{ marginTop:12 }}>
@@ -722,6 +678,9 @@ export default function App() {
                         <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
                           <Tag c={LV_COLOR[ex.lv]}>{LV_LABEL[ex.lv]}</Tag>
                           <Tag>{targetSets}セット × {ex.reps}回</Tag>
+                        </div>
+                        <div style={{ marginTop:6, fontFamily:"sans-serif", fontSize:11, color:"#666" }}>
+                          {suggestNext(exId, ex)}
                         </div>
                         <div style={{ marginTop:6, fontFamily:"sans-serif", fontSize:11, color:"#666" }}>
                           {suggestNext(exId, ex)}
