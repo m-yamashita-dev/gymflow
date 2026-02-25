@@ -162,6 +162,23 @@ function repMax(repText) {
   return nums.length ? Math.max(...nums) : null;
 }
 
+function weekStartKey(date = new Date()) {
+  const d = new Date(date);
+  const day = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - day);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+
+function todayKey(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+}
+
+function repMax(repText) {
+  if (!repText) return null;
+  const nums = (repText.match(/\d+/g) || []).map(Number);
+  return nums.length ? Math.max(...nums) : null;
+}
+
 /* ═══════════════════════════ APP ═══════════════════════════ */
 export default function App() {
   const [step, setStep]         = useState("select");   // select|suggest|edit|program|day|detail
@@ -177,14 +194,12 @@ export default function App() {
   const [newPrFlash, setNewPrFlash] = useState(null);   // exId of newly beaten PR
   const [restSeconds, setRestSeconds] = useState(90);
   const [restLeft, setRestLeft] = useState(0);
-  const [goal, setGoal]         = useState("beginner");
-  const [phaseWeek, setPhaseWeek] = useState(1);
-  const [noPrStreak, setNoPrStreak] = useState(0);
   const [workoutLogs, setWorkoutLogs] = useState({});
   const [exNotes, setExNotes]   = useState({});
   const [ioMsg, setIoMsg]       = useState("");
-  const [scheduleMsg, setScheduleMsg] = useState("");
-  const [hydrated, setHydrated] = useState(false);
+  const [goal, setGoal]         = useState("beginner");
+  const [phaseWeek, setPhaseWeek] = useState(1);
+  const [noPrStreak, setNoPrStreak] = useState({});
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -200,27 +215,8 @@ export default function App() {
       if (settingData?.restSeconds) setRestSeconds(settingData.restSeconds);
       if (settingData?.goal) setGoal(settingData.goal);
       if (settingData?.phaseWeek) setPhaseWeek(settingData.phaseWeek);
-      if (typeof settingData?.noPrStreak === "number") setNoPrStreak(settingData.noPrStreak);
-
-      const savedFreq = Number(settingData?.freq);
-      const savedAssigned = Array.isArray(settingData?.assigned)
-        ? settingData.assigned.filter(d => Number.isInteger(d) && d >= 0 && d <= 6)
-        : [];
-      if (savedFreq && PROGRAMS[savedFreq] && savedAssigned.length === savedFreq) {
-        setFreq(savedFreq);
-        setAssigned(savedAssigned);
-        const todayWeekday = (new Date().getDay() + 6) % 7;
-        const todayProgramIdx = savedAssigned.indexOf(todayWeekday);
-        if (todayProgramIdx !== -1) {
-          setDayIdx(todayProgramIdx);
-          setStep("day");
-        } else {
-          setStep("program");
-        }
-      }
-
+      if (settingData?.noPrStreak) setNoPrStreak(settingData.noPrStreak);
       setPrReady(true);
-      setHydrated(true);
     });
   }, []);
 
@@ -313,9 +309,124 @@ export default function App() {
     setDoneMap(p => ({ ...p, [key]: next }));
     if (next) {
       const i = getInp(exId, si);
-      await savePr(exId, i.w, i.r);
+      const improved = await savePr(exId, i.w, i.r);
+      const nextStreak = {
+        ...noPrStreak,
+        [exId]: improved ? 0 : (noPrStreak[exId] || 0) + 1,
+      };
+      setNoPrStreak(nextStreak);
+      await stSet("gf2:settings", { restSeconds, goal, phaseWeek, noPrStreak: nextStreak });
       await startRestTimer();
     }
+  };
+
+  useEffect(() => {
+    if (step !== "day" || !prog || dayIdx === null) return;
+    const dayData = prog.days[dayIdx];
+    const total = dayData.exIds.reduce((a,id) => a + calcTargetSets(EX_DB[id]), 0);
+    const done  = Object.values(doneMap).filter(Boolean).length;
+    if (!done) return;
+    const wk = weekStartKey();
+    const today = todayKey();
+    setWorkoutLogs(prev => {
+      const prevWeek = prev[wk] || { sessions:0, setsDone:0, setsTotal:0, days:{} };
+      const days = { ...(prevWeek.days || {}), [today]: true };
+      const next = { ...prev, [wk]: { sessions: Object.keys(days).length, setsDone: done, setsTotal: total, days } };
+      stSet("gf2:logs", next);
+      return next;
+    });
+  }, [doneMap, step, dayIdx, prog, calcTargetSets]);
+
+  const weekly = workoutLogs[weekStartKey()] || { sessions:0, setsDone:0, setsTotal:0, days:{} };
+  const suggestDeload = phaseInfo.type !== "deload" && weekly.setsTotal > 0 && weekly.setsDone / weekly.setsTotal < 0.55;
+
+  const suggestNext = (exId, ex) => {
+    const pr = prs[exId];
+    const streak = noPrStreak[exId] || 0;
+    if (streak >= 6) return "停滞中: 代替種目への切替を推奨";
+    if (!pr) return "次回目安: 記録後に表示";
+    const maxRep = repMax(ex.reps);
+    const repBias = goalPreset.addRep || 0;
+    if (!maxRep || !pr.w) return `次回目安: ${Math.max(1, pr.r + 1 + repBias)}回`;
+    if (phaseInfo.type === "deload") return `次回目安: ${Math.max(0, Number(pr.w) - 5)}kg × ${Math.max(5, pr.r - 2)}回`;
+    if (pr.r >= maxRep + repBias) return `次回目安: ${Number(pr.w) + (goal === "strength" ? 2.5 : 1.25)}kg × ${Math.max(6, maxRep - 2)}回`;
+    return `次回目安: ${pr.w}kg × ${Math.max(1, pr.r + 1 + repBias)}回`;
+  };
+
+  const exportData = () => {
+    const payload = { prs, logs: workoutLogs, notes: exNotes, settings: { restSeconds, goal, phaseWeek, noPrStreak }, exportedAt: new Date().toISOString() };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `gymflow-backup-${todayKey()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importData = async e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const json = JSON.parse(await file.text());
+      if (typeof json !== "object" || !json) throw new Error("invalid");
+      if (json.prs && typeof json.prs === "object") { setPrs(json.prs); await stSet("gf2:prs", json.prs); }
+      if (json.logs && typeof json.logs === "object") { setWorkoutLogs(json.logs); await stSet("gf2:logs", json.logs); }
+      if (json.notes && typeof json.notes === "object") { setExNotes(json.notes); await stSet("gf2:notes", json.notes); }
+      if (json.settings?.restSeconds) setRestSeconds(json.settings.restSeconds);
+      if (json.settings?.goal) setGoal(json.settings.goal);
+      if (json.settings?.phaseWeek) setPhaseWeek(json.settings.phaseWeek);
+      if (json.settings?.noPrStreak) setNoPrStreak(json.settings.noPrStreak);
+      if (json.settings) await stSet("gf2:settings", json.settings);
+      setIoMsg("バックアップを復元しました");
+    } catch {
+      setIoMsg("バックアップの読み込みに失敗しました");
+    } finally {
+      e.target.value = "";
+      setTimeout(() => setIoMsg(""), 2500);
+    }
+  };
+
+  useEffect(() => {
+    stSet("gf2:settings", { restSeconds, goal, phaseWeek, noPrStreak });
+  }, [restSeconds, goal, phaseWeek, noPrStreak]);
+
+  const nextPhaseWeek = () => setPhaseWeek(p => p >= PHASE_WEEKS.length ? 1 : p + 1);
+
+  const finalizeSession = (done, total) => {
+    const wk = weekStartKey();
+    const today = todayKey();
+    setWorkoutLogs(prev => {
+      const prevWeek = prev[wk] || { sessions:0, setsDone:0, setsTotal:0, days:{}, sessionsMeta:{} };
+      const days = { ...(prevWeek.days || {}), [today]: true };
+      const sessionsMeta = {
+        ...(prevWeek.sessionsMeta || {}),
+        [today]: {
+          done,
+          total,
+          completed: done >= total,
+          finishedAt: new Date().toLocaleString("ja-JP"),
+        }
+      };
+      const next = {
+        ...prev,
+        [wk]: {
+          ...prevWeek,
+          sessions: Object.keys(days).length,
+          setsDone: Math.max(done, prevWeek.setsDone || 0),
+          setsTotal: Math.max(total, prevWeek.setsTotal || 0),
+          days,
+          sessionsMeta,
+        }
+      };
+      stSet("gf2:logs", next);
+      return next;
+    });
+    setRestLeft(0);
+    setDoneMap({});
+    setInputMap({});
+    setDayIdx(null);
+    setStep("program");
   };
 
   useEffect(() => {
@@ -505,6 +616,26 @@ export default function App() {
                 <span style={{ color:"#555" }}>{d}</span><span style={{ color:"#ccc" }}>{m}</span>
               </div>
             ))}
+          </Card>
+
+          <Card style={{ marginTop:12 }}>
+            <Label>年間プラン設定（無料）</Label>
+            <div style={{ fontFamily:"sans-serif", fontSize:12, color:"#888", marginBottom:8 }}>目的とフェーズでセット数を自動調整します</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr", gap:8 }}>
+              {Object.entries(GOAL_PRESETS).map(([k, v]) => (
+                <button key={k} className="p" onClick={() => setGoal(k)} style={{
+                  textAlign:"left", padding:"8px 10px", borderRadius:10,
+                  border:`1px solid ${goal === k ? A : "#252525"}`,
+                  background: goal === k ? "#121b00" : "#111",
+                  color: goal === k ? A : "#aaa", cursor:"pointer", fontFamily:"sans-serif", fontSize:12
+                }}>{v.label}</button>
+              ))}
+            </div>
+            <div style={{ marginTop:10, display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+              <div style={{ fontFamily:"sans-serif", fontSize:12, color:"#777" }}>現在: Week {phaseWeek} / {PHASE_WEEKS.length} ({phaseInfo.label})</div>
+              <button className="p" onClick={nextPhaseWeek} style={{ background:A, color:"#000", border:"none", borderRadius:8, padding:"6px 10px", cursor:"pointer", fontWeight:700 }}>次の週へ</button>
+            </div>
+            {suggestDeload && <div style={{ marginTop:9, fontFamily:"sans-serif", fontSize:12, color:"#fbbf24" }}>達成率が低下しています。次週はデロード推奨です。</div>}
           </Card>
 
           <Card style={{ marginTop:12 }}>
@@ -765,6 +896,14 @@ export default function App() {
                 🏆 トレーニング完了！お疲れさまでした！
               </div>
             )}
+
+            <button className="p" onClick={() => finalizeSession(done, total)} style={{
+              width:"100%", background: pct === 100 ? A : "#1f2830", border:"none", borderRadius:12,
+              padding:"13px", color: pct === 100 ? "#000" : "#b5c7d6", cursor:"pointer",
+              fontFamily:"inherit", fontWeight:700, letterSpacing:"0.08em", marginBottom:12
+            }}>
+              {pct === 100 ? "本日のトレーニングを完了する" : `今日はここまでで完了する（${done}/${total}セット）`}
+            </button>
 
             {/* 種目リスト */}
             {dayData.exIds.map((exId, idx) => {
