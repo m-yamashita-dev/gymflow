@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 /* ═══════════════════════════ CONSTANTS ═══════════════════════════ */
 
@@ -112,6 +112,23 @@ async function stSet(k, v) {
   try { await window.storage.set(k, JSON.stringify(v)); } catch {}
 }
 
+function weekStartKey(date = new Date()) {
+  const d = new Date(date);
+  const day = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - day);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+
+function todayKey(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+}
+
+function repMax(repText) {
+  if (!repText) return null;
+  const nums = (repText.match(/\d+/g) || []).map(Number);
+  return nums.length ? Math.max(...nums) : null;
+}
+
 /* ═══════════════════════════ APP ═══════════════════════════ */
 export default function App() {
   const [step, setStep]         = useState("select");   // select|suggest|edit|program|day|detail
@@ -125,9 +142,26 @@ export default function App() {
   const [prs, setPrs]           = useState({});          // { exId: { w, r, date } }
   const [prReady, setPrReady]   = useState(false);
   const [newPrFlash, setNewPrFlash] = useState(null);   // exId of newly beaten PR
+  const [restSeconds, setRestSeconds] = useState(90);
+  const [restLeft, setRestLeft] = useState(0);
+  const [workoutLogs, setWorkoutLogs] = useState({});
+  const [exNotes, setExNotes]   = useState({});
+  const [ioMsg, setIoMsg]       = useState("");
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
-    stGet("gf2:prs").then(d => { if (d) setPrs(d); setPrReady(true); });
+    Promise.all([
+      stGet("gf2:prs"),
+      stGet("gf2:logs"),
+      stGet("gf2:notes"),
+      stGet("gf2:settings")
+    ]).then(([prsData, logData, noteData, settingData]) => {
+      if (prsData) setPrs(prsData);
+      if (logData) setWorkoutLogs(logData);
+      if (noteData) setExNotes(noteData);
+      if (settingData?.restSeconds) setRestSeconds(settingData.restSeconds);
+      setPrReady(true);
+    });
   }, []);
 
   const prog  = freq ? PROGRAMS[freq]          : null;
@@ -175,10 +209,85 @@ export default function App() {
   const setInp = (exId, si, field, val) =>
     setInputMap(p => ({ ...p, [exId]: { ...(p[exId]||{}), [si]: { ...(p[exId]?.[si]||{}), [field]: val } } }));
 
+  const startRestTimer = useCallback(async () => {
+    setRestLeft(restSeconds);
+    await stSet("gf2:settings", { restSeconds });
+  }, [restSeconds]);
+
+  useEffect(() => {
+    if (restLeft <= 0) return;
+    const t = setInterval(() => setRestLeft(v => v - 1), 1000);
+    return () => clearInterval(t);
+  }, [restLeft]);
+
+  useEffect(() => {
+    if (restLeft !== 0) return;
+    if (typeof window !== "undefined" && navigator.vibrate) navigator.vibrate([120, 80, 120]);
+  }, [restLeft]);
+
   const toggleSet = async (exId, si) => {
     const key = `${exId}_${si}`, next = !doneMap[key];
     setDoneMap(p => ({ ...p, [key]: next }));
-    if (next) { const i = getInp(exId, si); await savePr(exId, i.w, i.r); }
+    if (next) {
+      const i = getInp(exId, si);
+      await savePr(exId, i.w, i.r);
+      await startRestTimer();
+    }
+  };
+
+  useEffect(() => {
+    if (step !== "day" || !prog || dayIdx === null) return;
+    const dayData = prog.days[dayIdx];
+    const total = dayData.exIds.reduce((a,id) => a + (EX_DB[id]?.sets || 0), 0);
+    const done  = Object.values(doneMap).filter(Boolean).length;
+    if (!done) return;
+    const wk = weekStartKey();
+    setWorkoutLogs(prev => {
+      const next = { ...prev, [wk]: { sessions: Math.max(prev[wk]?.sessions || 0, 1), setsDone: done, setsTotal: total } };
+      stSet("gf2:logs", next);
+      return next;
+    });
+  }, [doneMap, step, dayIdx, prog]);
+
+  const weekly = workoutLogs[weekStartKey()] || { sessions:0, setsDone:0, setsTotal:0 };
+
+  const suggestNext = (exId, ex) => {
+    const pr = prs[exId];
+    if (!pr) return "次回目安: 記録後に表示";
+    const maxRep = repMax(ex.reps);
+    if (!maxRep || !pr.w) return `次回目安: ${pr.r + 1}回`;
+    if (pr.r >= maxRep) return `次回目安: ${Number(pr.w) + 2.5}kg × ${Math.max(6, maxRep - 2)}回`;
+    return `次回目安: ${pr.w}kg × ${pr.r + 1}回`;
+  };
+
+  const exportData = () => {
+    const payload = { prs, logs: workoutLogs, notes: exNotes, settings: { restSeconds }, exportedAt: new Date().toISOString() };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `gymflow-backup-${todayKey()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importData = async e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const json = JSON.parse(await file.text());
+      if (typeof json !== "object" || !json) throw new Error("invalid");
+      if (json.prs && typeof json.prs === "object") { setPrs(json.prs); await stSet("gf2:prs", json.prs); }
+      if (json.logs && typeof json.logs === "object") { setWorkoutLogs(json.logs); await stSet("gf2:logs", json.logs); }
+      if (json.notes && typeof json.notes === "object") { setExNotes(json.notes); await stSet("gf2:notes", json.notes); }
+      if (json.settings?.restSeconds) { setRestSeconds(json.settings.restSeconds); await stSet("gf2:settings", { restSeconds: json.settings.restSeconds }); }
+      setIoMsg("バックアップを復元しました");
+    } catch {
+      setIoMsg("バックアップの読み込みに失敗しました");
+    } finally {
+      e.target.value = "";
+      setTimeout(() => setIoMsg(""), 2500);
+    }
   };
 
   /* —— progress —— */
@@ -262,6 +371,34 @@ export default function App() {
                 <span style={{ color:"#555" }}>{d}</span><span style={{ color:"#ccc" }}>{m}</span>
               </div>
             ))}
+          </Card>
+
+          <Card style={{ marginTop:12 }}>
+            <Label>今週のダッシュボード</Label>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8 }}>
+              <div style={{ background:"#0f0f0f", border:"1px solid #1d1d1d", borderRadius:10, padding:"10px", textAlign:"center" }}>
+                <div style={{ fontSize:10, color:"#555", fontFamily:"sans-serif" }}>実施日数</div>
+                <div style={{ fontSize:24, color:A }}>{weekly.sessions}</div>
+              </div>
+              <div style={{ background:"#0f0f0f", border:"1px solid #1d1d1d", borderRadius:10, padding:"10px", textAlign:"center" }}>
+                <div style={{ fontSize:10, color:"#555", fontFamily:"sans-serif" }}>完了セット</div>
+                <div style={{ fontSize:24, color:A }}>{weekly.setsDone}</div>
+              </div>
+              <div style={{ background:"#0f0f0f", border:"1px solid #1d1d1d", borderRadius:10, padding:"10px", textAlign:"center" }}>
+                <div style={{ fontSize:10, color:"#555", fontFamily:"sans-serif" }}>達成率</div>
+                <div style={{ fontSize:24, color:A }}>{weekly.setsTotal ? Math.round(weekly.setsDone / weekly.setsTotal * 100) : 0}%</div>
+              </div>
+            </div>
+          </Card>
+
+          <Card style={{ marginTop:12 }}>
+            <Label>バックアップ</Label>
+            <div style={{ display:"flex", gap:8 }}>
+              <button className="p" onClick={exportData} style={{ flex:1, background:A, border:"none", borderRadius:10, padding:"10px", color:"#000", fontWeight:700, cursor:"pointer" }}>JSONを書き出し</button>
+              <button className="p" onClick={() => fileInputRef.current?.click()} style={{ flex:1, background:"#171717", border:"1px solid #242424", borderRadius:10, padding:"10px", color:"#aaa", cursor:"pointer" }}>JSONを読み込み</button>
+            </div>
+            {ioMsg && <div style={{ marginTop:8, fontFamily:"sans-serif", color:"#888", fontSize:12 }}>{ioMsg}</div>}
+            <input ref={fileInputRef} type="file" accept="application/json" onChange={importData} style={{ display:"none" }} />
           </Card>
         </div>
       )}
@@ -463,6 +600,18 @@ export default function App() {
               </div>
             </div>
 
+            <Card style={{ marginBottom:12 }}>
+              <Label>REST TIMER</Label>
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:10 }}>
+                <div style={{ fontSize:28, color: restLeft > 0 ? A : "#666" }}>{restLeft > 0 ? `${Math.floor(restLeft/60)}:${String(restLeft%60).padStart(2,"0")}` : "READY"}</div>
+                <div style={{ display:"flex", gap:6 }}>
+                  {[60,90,120].map(sec => (
+                    <button key={sec} className="p" onClick={() => setRestSeconds(sec)} style={{ background: restSeconds===sec ? A : "#1a1a1a", color: restSeconds===sec ? "#000" : "#666", border:"none", borderRadius:7, padding:"6px 9px", cursor:"pointer", fontSize:11 }}>{sec}s</button>
+                  ))}
+                </div>
+              </div>
+            </Card>
+
             {pct === 100 && (
               <div style={{ background:"#0f1a00", border:`1px solid ${A}44`, borderRadius:12, padding:"14px", marginBottom:14, textAlign:"center", fontFamily:"sans-serif", fontSize:14, color:A }}>
                 🏆 トレーニング完了！お疲れさまでした！
@@ -493,6 +642,9 @@ export default function App() {
                         <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
                           <Tag c={LV_COLOR[ex.lv]}>{LV_LABEL[ex.lv]}</Tag>
                           <Tag>{ex.sets}セット × {ex.reps}回</Tag>
+                        </div>
+                        <div style={{ marginTop:6, fontFamily:"sans-serif", fontSize:11, color:"#666" }}>
+                          {suggestNext(exId, ex)}
                         </div>
                       </div>
                       <button className="p" onClick={() => { setDetailEx({ id:exId, ...ex }); setStep("detail"); }} style={{
@@ -631,6 +783,20 @@ export default function App() {
           <Card style={{ marginBottom:12 }}>
             <Label>フォームのポイント</Label>
             <p style={{ fontFamily:"sans-serif", fontSize:13, color:"#bbb", lineHeight:1.8 }}>{detailEx.tip}</p>
+          </Card>
+
+          <Card style={{ marginBottom:12 }}>
+            <Label>トレーニングメモ</Label>
+            <textarea
+              value={exNotes[detailEx.id] || ""}
+              onChange={e => {
+                const next = { ...exNotes, [detailEx.id]: e.target.value };
+                setExNotes(next);
+                stSet("gf2:notes", next);
+              }}
+              placeholder="フォームの気づき・体調メモなど"
+              style={{ width:"100%", minHeight:86, resize:"vertical", background:"#0f0f0f", color:"#ddd", border:"1px solid #252525", borderRadius:10, padding:"10px", fontFamily:"sans-serif", fontSize:13, outline:"none" }}
+            />
           </Card>
 
           {/* YouTube */}
