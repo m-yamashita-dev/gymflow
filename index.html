@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+
+    <!-- PWA / iPhone設定 -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="GYMFLOW" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <meta name="mobile-web-app-capable" content="yes" />
+
+    <!-- OGP -->
+    <meta property="og:title" content="GYMFLOW - 筋トレメニュー" />
+    <meta property="og:description" content="週の頻度に合わせた筋トレメニュー管理アプリ" />
+    <meta property="og:type" content="website" />
+
+    <!-- Apple Touch Icon (ホーム画面アイコン) -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
+    <!-- iPhone X以降のセーフエリア対応 -->
+    <style>
+      body {
+        padding-top: env(safe-area-inset-top);
+        padding-bottom: env(safe-area-inset-bottom);
+      }
+    </style>
+
+    <title>GYMFLOW</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
