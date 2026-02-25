@@ -104,6 +104,23 @@ const EX_DB = {
 const LV_LABEL = ["","初心者","中級者","上級者"];
 const LV_COLOR = ["","#22c55e","#f59e0b","#ef4444"];
 
+const GOAL_PRESETS = {
+  beginner:   { label:"初心者（フォーム習得）", vol:0.8, addRep:0 },
+  hypertrophy:{ label:"筋肥大（ボリューム重視）", vol:1.35, addRep:1 },
+  strength:   { label:"筋力（高重量重視）", vol:1.0, addRep:-1 },
+  maintain:   { label:"維持（低疲労）", vol:0.7, addRep:0 },
+};
+
+const PHASE_WEEKS = [
+  { type:"volume", label:"高ボリューム" },
+  { type:"volume", label:"高ボリューム" },
+  { type:"volume", label:"高ボリューム" },
+  { type:"intensity", label:"高重量" },
+  { type:"deload", label:"デロード" },
+];
+
+const PHASE_FACTOR = { volume:1.1, intensity:1.0, deload:0.6 };
+
 /* ═══════════════════════════ STORAGE ═══════════════════════════ */
 async function stGet(k) {
   try { const r = await window.storage.get(k); return r ? JSON.parse(r.value) : null; } catch { return null; }
@@ -166,6 +183,16 @@ export default function App() {
 
   const prog  = freq ? PROGRAMS[freq]          : null;
   const sched = freq ? RECOVERY_SCHEDULES[freq]: null;
+  const phaseInfo = PHASE_WEEKS[Math.max(0, Math.min(PHASE_WEEKS.length - 1, phaseWeek - 1))];
+  const goalPreset = GOAL_PRESETS[goal] || GOAL_PRESETS.beginner;
+
+  const calcTargetSets = useCallback((ex) => {
+    if (!ex) return 0;
+    const base = ex.sets || 0;
+    const factor = (goalPreset.vol || 1) * (PHASE_FACTOR[phaseInfo.type] || 1);
+    return Math.max(1, Math.round(base * factor));
+  }, [goalPreset.vol, phaseInfo.type]);
+
 
   /* —— navigation —— */
   const goBack = () => {
@@ -193,7 +220,7 @@ export default function App() {
   /* —— PR save —— */
   const savePr = useCallback(async (exId, w, r) => {
     const weight = parseFloat(w), reps = parseInt(r);
-    if (!weight || !reps) return;
+    if (!weight || !reps) return false;
     const cur = prs[exId];
     if (!cur || weight * reps > cur.w * cur.r) {
       const next = { ...prs, [exId]: { w: weight, r: reps, date: new Date().toLocaleDateString("ja-JP") } };
@@ -201,7 +228,9 @@ export default function App() {
       await stSet("gf2:prs", next);
       setNewPrFlash(exId);
       setTimeout(() => setNewPrFlash(null), 2500);
+      return true;
     }
+    return false;
   }, [prs]);
 
   /* —— set inputs —— */
@@ -290,9 +319,15 @@ export default function App() {
     }
   };
 
+  useEffect(() => {
+    stSet("gf2:settings", { restSeconds, goal, phaseWeek, noPrStreak });
+  }, [restSeconds, goal, phaseWeek, noPrStreak]);
+
+  const nextPhaseWeek = () => setPhaseWeek(p => p >= PHASE_WEEKS.length ? 1 : p + 1);
+
   /* —— progress —— */
   const calcProg = dayData => {
-    const total = dayData.exIds.reduce((a,id) => a + (EX_DB[id]?.sets || 0), 0);
+    const total = dayData.exIds.reduce((a,id) => a + calcTargetSets(EX_DB[id]), 0);
     const done  = Object.values(doneMap).filter(Boolean).length;
     return { done, total, pct: total ? Math.round(done/total*100) : 0 };
   };
@@ -624,8 +659,9 @@ export default function App() {
               if (!ex) return null;
               const pr = prs[exId];
               const isNewPr = newPrFlash === exId;
-              const setsDone = Array.from({length:ex.sets},(_,i)=>doneMap[`${exId}_${i}`]).filter(Boolean).length;
-              const allDone = setsDone === ex.sets;
+              const targetSets = calcTargetSets(ex);
+              const setsDone = Array.from({length:targetSets},(_,i)=>doneMap[`${exId}_${i}`]).filter(Boolean).length;
+              const allDone = setsDone === targetSets;
 
               return (
                 <div key={exId} style={{
@@ -641,7 +677,10 @@ export default function App() {
                         </div>
                         <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
                           <Tag c={LV_COLOR[ex.lv]}>{LV_LABEL[ex.lv]}</Tag>
-                          <Tag>{ex.sets}セット × {ex.reps}回</Tag>
+                          <Tag>{targetSets}セット × {ex.reps}回</Tag>
+                        </div>
+                        <div style={{ marginTop:6, fontFamily:"sans-serif", fontSize:11, color:"#666" }}>
+                          {suggestNext(exId, ex)}
                         </div>
                         <div style={{ marginTop:6, fontFamily:"sans-serif", fontSize:11, color:"#666" }}>
                           {suggestNext(exId, ex)}
@@ -679,7 +718,7 @@ export default function App() {
                   {/* セット入力 */}
                   <div style={{ padding:"10px 15px 14px" }}>
                     <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                      {Array.from({length:ex.sets},(_,si) => {
+                      {Array.from({length:targetSets},(_,si) => {
                         const ip = getInp(exId, si);
                         const setDone = doneMap[`${exId}_${si}`];
                         return (
@@ -776,7 +815,7 @@ export default function App() {
           {/* セット・レップ */}
           <Card style={{ marginBottom:12 }}>
             <Label>推奨セット・レップ数</Label>
-            <div style={{ fontSize:22, color:A }}>{detailEx.sets}セット × {detailEx.reps}回</div>
+            <div style={{ fontSize:22, color:A }}>{calcTargetSets(detailEx)}セット × {detailEx.reps}回</div>
           </Card>
 
           {/* フォームポイント */}
